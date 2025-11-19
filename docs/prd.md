@@ -159,6 +159,8 @@ On initial setup, the system must seed:
   * `amount`: `0`
   * `blockchainEnabled`: `false`
 
+Seed data is automatically created on backend startup via `ensureFoundationSeed()`.
+
 Escrow balances are represented via:
 
 * P1 and P2 `mockBalancePhp`
@@ -246,17 +248,18 @@ Global reset of the system.
 
 * Operations:
 
-  * `P1.mockBalancePhp = 200000`
-  * `P2.mockBalancePhp = 0`
+  * `P1.mockBalancePhp = 200000` (initial seed balance)
+  * `P2.mockBalancePhp = 0` (initial seed balance)
   * `Escrow.amount = 0`
   * `Escrow.state = CREATED`
-  * `Escrow.blockchainEnabled = false`
+  * `Escrow.blockchainEnabled = true` (enabled after reset)
+  * Delete all existing `EscrowEvent` records for this escrow
 * Event:
 
-  * `EscrowEvent` with `action = "SYSTEM_RESET"`
+  * Create a new `EscrowEvent` with `action = "SYSTEM_RESET"` (this becomes the only log entry)
 * Blockchain:
 
-  * If previously enabled, this action is also logged via memo.
+  * If blockchain was enabled, this action is logged via memo.
 
 All state-modifying operations must be wrapped in database transactions to ensure consistency.
 
