@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(uuid())
+  name           String
+  gcashHandle    String   @unique
+  mockBalancePhp Int      @default(0)
+  createdAt      DateTime @default(now())
+  buyerEscrows   Escrow[] @relation("Buyer")
+  sellerEscrows  Escrow[] @relation("Seller")
+}
+
+model Escrow {
+  id                String        @id @default("ESCROW_SINGLE")
+  buyerId           String
+  sellerId          String
+  buyer             User          @relation("Buyer", fields: [buyerId], references: [id])
+  seller            User          @relation("Seller", fields: [sellerId], references: [id])
+  amount            Int           @default(0)
+  state             EscrowState   @default(CREATED)
+  blockchainEnabled Boolean       @default(false)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  events            EscrowEvent[]
+}
+
+model EscrowEvent {
+  id              String   @id @default(uuid())
+  escrowId        String
+  escrow          Escrow   @relation(fields: [escrowId], references: [id])
+  action          String
+  actor           String?
+  payload         Json?
+  timestamp       DateTime @default(now())
+  solanaSignature String?
+}
+
+enum EscrowState {
+  CREATED
+  FUNDED
+  P1_CONFIRMED
+  P2_CONFIRMED
+  RELEASED
+}
+
