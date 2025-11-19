@@ -110,6 +110,7 @@ model Escrow {
   state             EscrowState   @default(CREATED)
   blockchainEnabled Boolean       @default(false)
   createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
   events            EscrowEvent[]
 }
 
@@ -272,6 +273,7 @@ If `Escrow.blockchainEnabled === true`, the following actions must trigger memo 
 * P2_CONFIRM
 * RELEASE
 * RESET
+* ACCOUNT_FUNDED (when funds are added to P1 or P2 via the fund account feature)
 
 ### 5.2 Memo Payload
 
@@ -295,9 +297,13 @@ The backend `BlockchainService.logEventOnChain(payload)` must:
 * Use `@solana/web3.js`
 * Initialize a connection with `SOLANA_RPC_URL`
 * Load keypair from `SOLANA_PRIVATE_KEY`
+* Fetch the latest blockhash from the RPC
 * Build a transaction including a Memo instruction with the payload
 * Send and confirm the transaction
-* Return the generated `signature` string
+* Return an object containing:
+  * `signature`: Transaction signature (also used as `txId`)
+  * `txId`: Transaction ID (same as signature)
+  * `hash`: The blockhash used for the transaction
 
 ### 5.4 Event and Signature Storage
 
@@ -305,14 +311,24 @@ For each blockchain-enabled action:
 
 1. Create an `EscrowEvent` with `action`, `actor`, and `payload`.
 2. Execute the memo transaction.
-3. Update the `EscrowEvent.solanaSignature` with the returned `signature`.
+3. If successful, update the `EscrowEvent`:
+   * Set `solanaSignature` to the transaction signature
+   * Store blockchain metadata in `payload.blockchain`:
+     ```json
+     {
+       "hash": "<blockhash>",
+       "txId": "<signature>",
+       "signature": "<signature>"
+     }
+     ```
 
-If blockchain is disabled, the event is created with `solanaSignature = null`.
+If blockchain is disabled, the event is created with `solanaSignature = null` and no blockchain metadata.
 
 If Solana calls fail, the system should:
 
-* Still store the event with `solanaSignature = null` and the error message in `payload`.
-* Return a successful response so UI remains usable, while the log window highlights the blockchain error.
+* Still store the event with `solanaSignature = null`
+* Store the error message in `payload.blockchainError`
+* Return a successful response so UI remains usable, while the log window highlights the blockchain error
 
 ---
 
@@ -457,7 +473,7 @@ Resets the full system per Section 4.5 and returns:
 
 ### 6.6 GET /logs
 
-Returns a chronological list of events:
+Returns a chronological list of events (newest first, limited to 100):
 
 ```json
 {
@@ -467,14 +483,71 @@ Returns a chronological list of events:
       "timestamp": "2025-..",
       "action": "ESCROW_FUNDED",
       "actor": "P1",
-      "payload": { "amount": 40000 },
+      "payload": {
+        "amount": 40000,
+        "blockchain": {
+          "hash": "blockhash...",
+          "txId": "signature...",
+          "signature": "signature..."
+        }
+      },
       "solanaSignature": "3x28f9F...aB19c"
     }
   ]
 }
 ```
 
-The frontend uses this to render the “event log window.”
+The frontend uses this to render the "event log window."
+
+### 6.7 DELETE /logs
+
+Clears all event logs for the escrow.
+
+* No body required
+* Returns: `{ "events": [] }`
+
+This endpoint is useful for resetting the log view without resetting the entire system.
+
+### 6.8 POST /fund-account
+
+Adds funds directly to a user's account (P1 or P2) for testing/demo purposes.
+
+Body:
+
+```json
+{
+  "target": "P1",
+  "amount": 50000
+}
+```
+
+or
+
+```json
+{
+  "target": "P2",
+  "amount": 30000
+}
+```
+
+Behavior:
+
+* Validates `amount > 0`
+* Increments the target user's `mockBalancePhp` by the specified amount
+* Creates an `EscrowEvent` with `action = "ACCOUNT_FUNDED"` and `actor = target`
+* If blockchain enabled, logs the event on-chain
+* Returns updated system state
+
+Response:
+
+```json
+{
+  "escrow": { ... },
+  "buyer": { "balancePhp": 250000 },
+  "seller": { "balancePhp": 30000 },
+  "blockchainEnabled": true
+}
+```
 
 ---
 
@@ -484,13 +557,13 @@ The frontend uses this to render the “event log window.”
 
 The UI is a single page with:
 
-* Top-right: Blockchain toggle
+* Top-right: Blockchain toggle and "Fund account" button
 * Center row: three avatar circles for:
 
-  * P1 (Buyer) with balance and “Send Money” flow
-  * Escrow Account with locked amount
-  * P2 (Seller) with balance and “Confirm” button
-* Bottom: Log window and RESET button
+  * P1 (Buyer) with balance and "Send Money" flow
+  * Escrow Account with locked amount and status
+  * P2 (Seller) with balance and "Confirm" button
+* Bottom: Log window with "Refresh" and "Clear logs" buttons, and RESET button
 
 ### 7.2 State Source
 
@@ -504,6 +577,8 @@ The frontend must not simulate business logic. It must:
   * `POST /escrow/fund`
   * `POST /escrow/confirm`
   * `POST /reset`
+  * `POST /fund-account`
+  * `DELETE /logs`
 
 Any UI changes depend on backend responses.
 
@@ -530,29 +605,47 @@ Any UI changes depend on backend responses.
   * When a party confirms, their button becomes disabled/marked “CONFIRMED ✓”.
   * When both have confirmed, balances and state update to RELEASED.
 
+* **Fund Account**
+
+  * Accessible via "+ Fund" button in top-right
+  * Opens a modal allowing selection of P1 or P2
+  * Accepts any positive amount (no step restrictions)
+  * Calls `POST /fund-account` with target and amount
+  * Updates balances and logs the event (blockchain-backed if enabled)
+
 * **RESET**
 
-  * Calls `/reset`.
+  * Calls `POST /reset`.
   * Resets all UI state based on backend response.
+  * Clears all event logs (only SYSTEM_RESET event remains after reset)
 
 ### 7.4 Log Window
 
-* Periodically or on action, fetch `/logs`.
+* Periodically (every 5 seconds) or on action, fetch `GET /logs`.
+* Display events in reverse chronological order (newest first).
 * For each event:
 
   * If `solanaSignature === null`:
 
     * Render as **EVENT**.
+    * If `payload.blockchainError` exists, display the error message.
   * If `solanaSignature` is present:
 
     * Render as **BLOCKCHAIN EVENT**, including:
 
-      * Signature
+      * Action, actor, and amount information
+      * Blockchain metadata (if available in `payload.blockchain`):
+        * Hash
+        * Tx ID
+        * Signature
       * Link to Solscan:
 
         * `https://solscan.io/tx/<signature>?cluster=devnet`
+      * If `payload.blockchainError` exists, display the error message (transaction failed)
 
-The log window should be readable and technically informative.
+* **Clear Logs Button**: Calls `DELETE /logs` to remove all event entries (useful for testing without full reset).
+
+The log window should be readable and technically informative, displaying all blockchain transaction details when available.
 
 ---
 
@@ -573,7 +666,8 @@ The log window should be readable and technically informative.
 
   * Invalid state transitions
   * Attempting to toggle blockchain during active escrow
-  * Funding more than P1’s balance
+  * Funding more than P1's balance
+  * Fund account with amount ≤ 0
 
 * Return 500 for:
 
@@ -597,9 +691,11 @@ This foundation system delivers:
 
 * A real, working escrow engine.
 * Real DB-backed balances and escrow.
-* Real Solana devnet memo logging with signatures.
+* Real Solana devnet memo logging with full transaction metadata (hash, tx ID, signature).
 * Clear, stable REST APIs.
 * A simple but functional single-page UI for demonstration.
+* Account funding capability for testing/demo purposes.
+* Event log management (view and clear).
 
 It is designed so that future work can:
 
